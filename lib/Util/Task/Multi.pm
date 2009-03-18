@@ -110,7 +110,7 @@ sub execute {
             # to update the input-keys-to-task-ids mapping in a moment.
             # We also leave task_ids_by_key so that we won't re-run coalescable tasks
             # that we've already run.
-            my $task_ids_by_original_task_id = $self->_make_batches($next_tasks, $batches, $tasks_by_id, $task_ids_by_key, $progressions_by_id, $id_ref_by_id, undef);
+            my $task_ids_by_original_task_id = $self->_make_batches($next_tasks, $batches, $tasks_by_id, $task_ids_by_key, $progressions_by_id, $id_ref_by_id, \$idx);
 
             # Update $task_ids_by_k to point at the new task ids rather than the old,
             # so that when we're done we use the final result.

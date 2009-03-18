@@ -76,7 +76,7 @@ in a single batch) and no task key.
 
 =cut
 
-sub keys {
+sub batching_keys {
     my ($self) = @_;
     return (Scalar::Util::blessed($self), 'default', undef);
 }

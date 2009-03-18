@@ -30,14 +30,12 @@ sub new {
 }
 
 sub execute_multi {
-    my ($class, $tasks) = @_;
+    my ($class, $batching_key, $tasks, $results) = @_;
 
-    my $ret = {};
     foreach my $k (keys %$tasks) {
         my $task = $tasks->{$k};
-        $ret->{$k} = $task->();
+        $results->{$k} = $task->();
     }
-    return $ret;
 }
 
 1;

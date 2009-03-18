@@ -48,10 +48,12 @@ sub batches_for_debugging {
     my $batches = {};
     my $tasks_by_id = {};
     my $task_ids_by_key = {};
+    my $progressions_by_id = {};
+    my $id_ref_by_id = {};
     my $idx = 1;
 
     # Recursively fill the above data structures, flattening out nested Multi-tasks.
-    $self->_prepare_request($batches, $tasks_by_id, $task_ids_by_key, \$idx);
+    $self->_make_batches($self->{tasks}, $batches, $tasks_by_id, $task_ids_by_key, $progressions_by_id, $id_ref_by_id, \$idx);
 
     return [ values(%$batches) ];
 }
@@ -62,19 +64,67 @@ sub execute {
     my $batches = {};
     my $tasks_by_id = {};
     my $task_ids_by_key = {};
+    my $progressions_by_id = {};
+    my $id_ref_by_id = {};
     my $idx = 1;
 
+    my $tasks = $self->{tasks};
+
     # Recursively fill the above data structures, flattening out nested Multi-tasks.
-    my $task_ids_by_k = $self->_prepare_request($batches, $tasks_by_id, $task_ids_by_key, \$idx);
+    my $task_ids_by_k = $self->_make_batches($tasks, $batches, $tasks_by_id, $task_ids_by_key, $progressions_by_id, $id_ref_by_id, \$idx);
 
     my $results = {};
 
-    # By now we've got everything nicely batched up in $batches, so let's execute the batch jobs.
-    foreach my $global_batch_key (keys %$batches) {
-        my $batch = $batches->{$global_batch_key};
+    while (%$batches) {
 
-        my ($class, $batch_key, $tasks) = @{$batch};
-        $class->execute_multi($batch_key, $tasks, $results);
+        # By now we've got everything nicely batched up in $batches, so let's execute the batch jobs.
+        foreach my $global_batch_key (keys %$batches) {
+            my $batch = $batches->{$global_batch_key};
+
+            my ($class, $batch_key, $tasks) = @{$batch};
+            $class->execute_multi($batch_key, $tasks, $results);
+        }
+
+        if (%$progressions_by_id) {
+            # If there are any progressions, then we need to run another phase.
+            my $next_tasks = {};
+            foreach my $task_id (keys %$progressions_by_id) {
+                my $progression = $progressions_by_id->{$task_id};
+                my $intermediate_result = $results->{$task_id};
+                $results->{$task_id} = undef;
+                my $next_task = $progression->($intermediate_result);
+
+                if (defined($next_task)) {
+                    $next_tasks->{$task_id} = $next_task if defined($next_task);
+                }
+                else {
+                    # Leave the result as undef and carry on.
+                }
+            }
+
+            # Reset and calculate the batches for the next phase.
+            $batches = {};
+            $tasks_by_id = {};
+            $progressions_by_id = {};
+            # We intentionally don't reset $id_ref_by_id because we're going to use it
+            # to update the input-keys-to-task-ids mapping in a moment.
+            # We also leave task_ids_by_key so that we won't re-run coalescable tasks
+            # that we've already run.
+            my $task_ids_by_original_task_id = $self->_make_batches($next_tasks, $batches, $tasks_by_id, $task_ids_by_key, $progressions_by_id, $id_ref_by_id, undef);
+
+            # Update $task_ids_by_k to point at the new task ids rather than the old,
+            # so that when we're done we use the final result.
+            foreach my $old_task_id (%$task_ids_by_original_task_id) {
+                if (my $id_ref = $id_ref_by_id->{$old_task_id}) {
+                    $$id_ref = $task_ids_by_original_task_id->{$old_task_id};
+                }
+            }
+        }
+        else {
+            # We're done!
+            last;
+        }
+
     }
 
     # To avoid copying, we prepare the return value inside the $task_ids_by_k hash, since
@@ -88,23 +138,31 @@ sub execute {
     return $ret;
 }
 
-sub _prepare_request {
-    my ($self, $batches, $tasks_by_id, $task_ids_by_key, $idx_ref) = @_;
+sub _make_batches {
+    my ($self, $tasks, $batches, $tasks_by_id, $task_ids_by_key, $progressions_by_id, $id_ref_by_id, $idx_ref) = @_;
 
     my $task_ids_by_k = {};
 
-    print STDERR "My tasks are ".Data::Dumper::Dumper($self->{tasks});
+    foreach my $k (keys(%$tasks)) {
+        my $task = $tasks->{$k};
 
-    foreach my $k (keys(%{$self->{tasks}})) {
-        my $task = $self->{tasks}{$k};
+        # If the caller passed in an $idx_ref then they want us to assign ids. Otherwise, the ids
+        # are already assigned in $k.
+        my $task_id = $$idx_ref++;
+
+        if ($task->isa('Util::Task::Sequence')) {
+            # If we have a sequence, then we make a note that it's a sequence and then
+            # treat it as if it were its base step for the purposes of batching.
+            $progressions_by_id->{$task_id} = $task->progression_function;
+            $task = $task->base_task;
+        }
 
         if ($task->isa('Util::Task::Multi')) {
             # If we have nested Multi-tasks, flatten it all out so that we can
             # batch the sub-tasks too.
-            $task_ids_by_k->{$k} = $task->_prepare($batches, $tasks_by_id, $task_ids_by_key, $idx_ref);
+            $task_ids_by_k->{$k} = $task->_make_batches($task->{tasks}, $batches, $tasks_by_id, $task_ids_by_key, $progressions_by_id, $id_ref_by_id, $idx_ref);
         }
         else {
-            my $task_id = $$idx_ref++;
             my ($class, $batch_key, $task_key) = $task->batching_keys;
             my $global_batch_key = join("\t", $class, $batch_key);
             my $global_task_key = defined($task_key) ? join("\t", $global_batch_key, $task_key) : undef;
@@ -118,6 +176,7 @@ sub _prepare_request {
             }
 
             $task_ids_by_k->{$k} = $task_id;
+            $id_ref_by_id->{$task_id} = \$task_ids_by_k->{$k};
         }
     }
 
@@ -144,7 +203,7 @@ sub _prepare_response {
 # If this ever gets called directly then someone's doing something wrong.
 # execute_multi is only intended to be used by this class's execute implementation.
 sub execute_multi {
-    Carp::croak("Shouldn't call Typecore::Task::Multi->execute_multi directly");
+    Carp::croak("Shouldn't call Util::Task::Multi->execute_multi directly");
 }
 
 1;
